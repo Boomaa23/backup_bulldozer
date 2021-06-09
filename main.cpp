@@ -1,12 +1,5 @@
-#include <iostream>
-#include <windows.h>
-#include <vector>
-#include <sstream>
-#include <filesystem>
-#include <string>
-#include <thread>
+#include "common.h"
 #include "wpd.h"
-
 
 static const std::filesystem::directory_options FS_DIR_OPTS = (
         std::filesystem::directory_options::follow_directory_symlink |
@@ -29,11 +22,6 @@ static const std::string MONTHS[] = {
 };
 
 static const char BYTE_PREFIXES[] = {'k', 'M', 'G', 'T', 'P', 'E'};
-
-struct Drive {
-    char letter;
-    std::string name;
-};
 
 struct CopyResult {
     bool success;
@@ -59,7 +47,7 @@ int getCurrentMsTime() {
 
 std::string printDrive(Drive *drive, bool toStdOut) {
     std::stringstream ss;
-    ss << drive->letter << " - " << drive->name << std::endl;
+    ss << drive->path << " - " << drive->name << std::endl;
     if (toStdOut) {
         std::cout << ss.str();
     }
@@ -74,7 +62,7 @@ SYSTEMTIME getFileTime(HANDLE *file) {
     return sysTime;
 }
 
-std::vector<Drive> getDrives() {
+std::vector<Drive> getLogicalDrives() {
     DWORD reqBufSize = GetLogicalDriveStringsA(0, nullptr);
     LPSTR driveLetters = new TCHAR[reqBufSize];
     GetLogicalDriveStringsA(reqBufSize, driveLetters);
@@ -85,7 +73,7 @@ std::vector<Drive> getDrives() {
             LPSTR volName = new TCHAR[256];
             GetVolumeInformationA(loopDrive, volName, (DWORD) 256,
                     nullptr, nullptr, nullptr, nullptr, 0);
-            drives.push_back(Drive{loopDrive[0], volName});
+            drives.push_back(Drive{std::string(1, loopDrive[0]) + ":\\", volName});
             delete[] volName;
         }
         while (*loopDrive++);
@@ -118,16 +106,28 @@ CopyResult copyFile(std::string *srcPath, const Drive *srcDrive, const std::stri
     return CopyResult{success, fileSize};
 }
 
-Drive selectDrive(std::vector<Drive> *drives) {
-    for (size_t i = 0; i < drives->size(); i++) {
+IndexedDrive selectDrive(std::vector<Drive> *drives, std::vector<WPDevice> *wpDevices) {
+    size_t i;
+    for (i = 0; i < drives->size(); i++) {
         std::cout << i << ") " << printDrive(&drives->at(i), false);
+    }
+    for (i = 0; i < wpDevices->size(); i++) {
+        std::cout << drives->size() + i << ") " << printDrive(&wpDevices->at(i), false);
     }
     std::string sel;
     do {
         std::getline(std::cin, sel);
     } while (sel.empty());
-    int idx = std::stoi(sel);
-    return drives->at(idx);
+    UINT idx = std::stoi(sel);
+    Drive *selDrive;
+    bool isWPD;
+    if (isWPD = i >= drives->size()) {
+        idx -= drives->size();
+        selDrive = &wpDevices->at(idx);
+    } else {
+        selDrive = &drives->at(idx);
+    }
+    return IndexedDrive{selDrive->path, selDrive->name, idx, isWPD};
 }
 
 std::string userInput(const std::string &preMessage, bool allowBlank) {
@@ -160,8 +160,7 @@ void cleanExtension(std::string *ext) {
 
 int main() {
     wpdInitialize();
-    EnumerateAllDevices();
-    std::vector<Drive> drives = getDrives();
+    std::vector<Drive> drives = getLogicalDrives();
     std::string out = userInput("Base destination path:", false);
     if (out.at(out.size() - 1) != '\\') {
         out.push_back('\\');
@@ -170,18 +169,27 @@ int main() {
     if (!fileType.empty()) {
         cleanExtension(&fileType);
     }
-    Drive selDrive = selectDrive(&drives);
+
+    CComPtr<IPortableDevice> portableDevice;
+    std::vector<WPDevice> wpDevices = GetAllDevices();
+
+    IndexedDrive selDrive = selectDrive(&drives, &wpDevices);
+    if (selDrive.isWPD) {
+        ChooseDevice(&portableDevice, selDrive.index, wpDevices.size());
+        std::vector<std::string> deviceObjectIds;
+        GetAllContent(portableDevice, &deviceObjectIds);
+        return 0;
+    }
     if (selDrive.name.empty()) {
         selDrive.name = userInput("Drive name missing, input new name:", false);
     }
-    std::string dirHead(1, selDrive.letter);
 
     int64_t copiedBytes = 0;
     int64_t skippedBytes = 0;
     int startTime = getCurrentMsTime();
     std::cout << "Starting copy..." << std::endl;
     for (const std::filesystem::directory_entry &entry :
-            std::filesystem::recursive_directory_iterator(dirHead + ":\\", FS_DIR_OPTS)) {
+            std::filesystem::recursive_directory_iterator(selDrive.path, FS_DIR_OPTS)) {
         std::string inPath = entry.path().string();
         size_t extPos = inPath.find_last_of('.');
         bool skipType = fileType.empty();

@@ -74,13 +74,9 @@ void GetClientInformation(IPortableDeviceValues** ppClientInformation) {
 // and to obtain the total number of devices found.  If 1 or more devices
 // are found, this function prompts the user to choose a device using
 // a zero-based index.
-void ChooseDevice(IPortableDevice** ppDevice) {
+void ChooseDevice(IPortableDevice** ppDevice, const UINT uiCurrentDevice, DWORD cPnPDeviceIDs) {
     HRESULT                         hr              = S_OK;
-    UINT                            uiCurrentDevice = 0;
-    CHAR                            szSelection[81] = {0};
-    DWORD                           cPnPDeviceIDs   = 0;
-    PWSTR*                          pPnpDeviceIDs   = nullptr;
-
+    PWSTR*                          pPnpDeviceIDs   = NULL;
     CComPtr<IPortableDeviceManager> pPortableDeviceManager;
     CComPtr<IPortableDeviceValues>  pClientInformation;
 
@@ -102,95 +98,59 @@ void ChooseDevice(IPortableDevice** ppDevice) {
 
     GetClientInformation(&pClientInformation);
 
-    // Enumerate and display all devices.
-    cPnPDeviceIDs = EnumerateAllDevices();
+    // CoCreate the IPortableDeviceManager interface to enumerate
+    // portable devices and to get information about them.
+    hr = CoCreateInstance(CLSID_PortableDeviceManager,
+                          NULL,
+                          CLSCTX_INPROC_SERVER,
+                          IID_PPV_ARGS(&pPortableDeviceManager));
+    if (FAILED(hr)) {
+        printf("! Failed to CoCreateInstance CLSID_PortableDeviceManager, hr = 0x%lx\n",hr);
+    }
 
-    if (cPnPDeviceIDs > 0) {
-        // Prompt user to enter an index for the device they want to choose.
-        printf("Enter the index of the device you wish to use.\n>");
-        hr = StringCbGetsA(szSelection,sizeof(szSelection));
+    if (SUCCEEDED(hr)) {
+        pPnpDeviceIDs = new (std::nothrow)PWSTR[cPnPDeviceIDs];
+        hr = pPortableDeviceManager->GetDevices(pPnpDeviceIDs, &cPnPDeviceIDs);
         if (SUCCEEDED(hr)) {
-            uiCurrentDevice = (UINT) atoi(szSelection);
-            if (uiCurrentDevice >= cPnPDeviceIDs) {
-                printf("An invalid device index was specified, defaulting to the first device in the list.\n");
-                uiCurrentDevice = 0;
+            // CoCreate the IPortableDevice interface and call Open() with
+        // the chosen PnPDeviceID string.
+            hr = CoCreateInstance(CLSID_PortableDeviceFTM,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(ppDevice));
+            if (SUCCEEDED(hr)) {
+                // FORCE READ-ONLY, DO NOT WRITE
+                //pClientInformation->SetUnsignedIntegerValue(WPD_CLIENT_DESIRED_ACCESS, GENERIC_READ);
+                hr = (*ppDevice)->Open(pPnpDeviceIDs[uiCurrentDevice], pClientInformation);
+                if (FAILED(hr)) {
+                    printf("! Failed to Open the device, hr = 0x%lx\n", hr);
+                    // Release the IPortableDevice interface, because we cannot proceed
+                    // with an unopen device.
+                    (*ppDevice)->Release();
+                    *ppDevice = nullptr;
+                }
+            } else {
+                printf("! Failed to CoCreateInstance CLSID_PortableDeviceFTM, hr = 0x%lx\n", hr);
             }
         } else {
-            printf("An invalid device index was specified, defaulting to the first device in the list.\n");
-            uiCurrentDevice = 0;
+            printf("! Failed to get the device list from the system, hr = 0x%lx\n", hr);
         }
 
-        // CoCreate the IPortableDeviceManager interface to enumerate
-        // portable devices and to get information about them.
-        hr = CoCreateInstance(CLSID_PortableDeviceManager,
-                              nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&pPortableDeviceManager));
-        if (FAILED(hr)) {
-            printf("! Failed to CoCreateInstance CLSID_PortableDeviceManager, hr = 0x%lx\n",hr);
+        // Free all returned PnPDeviceID strings by using CoTaskMemFree.
+        // NOTE: CoTaskMemFree can handle nullptr pointers, so no nullptr
+        //       check is needed.
+        for (DWORD dwIndex = 0; dwIndex < cPnPDeviceIDs; dwIndex++) {
+            CoTaskMemFree(pPnpDeviceIDs[dwIndex]);
+            pPnpDeviceIDs[dwIndex] = nullptr;
         }
 
-        // Allocate an array to hold the PnPDeviceID strings returned from
-        // the IPortableDeviceManager::GetDevices method
-        if (SUCCEEDED(hr) && (cPnPDeviceIDs > 0)) {
-            pPnpDeviceIDs = new (std::nothrow)PWSTR[cPnPDeviceIDs];
-            if (pPnpDeviceIDs != nullptr) {
-                DWORD dwIndex = 0;
-
-                hr = pPortableDeviceManager->GetDevices(pPnpDeviceIDs, &cPnPDeviceIDs);
-                if (SUCCEEDED(hr)) {
-                    // CoCreate the IPortableDevice interface and call Open() with
-                    // the chosen PnPDeviceID string.
-                    hr = CoCreateInstance(CLSID_PortableDeviceFTM,
-                                          nullptr,
-                                          CLSCTX_INPROC_SERVER,
-                                          IID_PPV_ARGS(ppDevice));
-                    if (SUCCEEDED(hr)) {
-                        hr = (*ppDevice)->Open(pPnpDeviceIDs[uiCurrentDevice], pClientInformation);
-                        if (FAILED(hr)) {
-                            if (hr == E_ACCESSDENIED) {
-                                printf("Failed to Open the device for Read Write access, will open it for Read-only access instead\n");
-                                pClientInformation->SetUnsignedIntegerValue(WPD_CLIENT_DESIRED_ACCESS, GENERIC_READ);
-                                hr = (*ppDevice)->Open(pPnpDeviceIDs[uiCurrentDevice], pClientInformation);
-                                if (FAILED(hr)) {
-                                    printf("! Failed to Open the device, hr = 0x%lx\n",hr);
-                                    // Release the IPortableDevice interface, because we cannot proceed
-                                    // with an unopen device.
-                                    (*ppDevice)->Release();
-                                    *ppDevice = nullptr;
-                                }
-                            } else {
-                                printf("! Failed to Open the device, hr = 0x%lx\n",hr);
-                                // Release the IPortableDevice interface, because we cannot proceed
-                                // with an unopen device.
-                                (*ppDevice)->Release();
-                                *ppDevice = nullptr;
-                            }
-                        }
-                    } else {
-                        printf("! Failed to CoCreateInstance CLSID_PortableDeviceFTM, hr = 0x%lx\n",hr);
-                    }
-                } else {
-                    printf("! Failed to get the device list from the system, hr = 0x%lx\n",hr);
-                }
-
-                // Free all returned PnPDeviceID strings by using CoTaskMemFree.
-                // NOTE: CoTaskMemFree can handle nullptr pointers, so no nullptr
-                //       check is needed.
-                for (dwIndex = 0; dwIndex < cPnPDeviceIDs; dwIndex++) {
-                    CoTaskMemFree(pPnpDeviceIDs[dwIndex]);
-                    pPnpDeviceIDs[dwIndex] = nullptr;
-                }
-
-                // Delete the array of PWSTR pointers
-                delete [] pPnpDeviceIDs;
-                pPnpDeviceIDs = nullptr;
-            } else {
-                printf("! Failed to allocate memory for PWSTR array\n");
-            }
+        // Delete the array of PWSTR pointers
+        delete[] pPnpDeviceIDs;
+        pPnpDeviceIDs = nullptr;
+        } else {
+            printf("! Failed to get the device list from the system, hr = 0x%lx\n", hr);
         }
-    }
-    // If no devices were found on the system, just exit this function.
+        // If no devices were found on the system, just exit this function.
 }
 
 void UnregisterForEventNotifications(_In_opt_ IPortableDevice *device, _In_opt_ PCWSTR eventCookie) {
@@ -208,11 +168,8 @@ void UnregisterForEventNotifications(_In_opt_ IPortableDevice *device, _In_opt_ 
 
 // Recursively called function which enumerates using the specified
 // object identifier as the parent.
-void RecursiveEnumerate(_In_ PCWSTR objectID, _In_ IPortableDeviceContent* content) {
+void RecursiveEnumerate(_In_ PCWSTR objectID, _In_ IPortableDeviceContent* content, _In_ std::vector<std::string>* deviceObjectIds) {
     CComPtr<IEnumPortableDeviceObjectIDs> enumObjectIDs;
-
-    // Print the object identifier being used as the parent during enumeration.
-    wprintf(L"%ws\n", objectID);
 
     // Get an IEnumPortableDeviceObjectIDs interface by calling EnumObjects with the
     // specified parent object identifier.
@@ -225,7 +182,7 @@ void RecursiveEnumerate(_In_ PCWSTR objectID, _In_ IPortableDeviceContent* conte
     }
 
     // Loop calling Next() while S_OK is being returned.
-    while(hr == S_OK) {
+    while (hr == S_OK) {
         DWORD  numFetched = 0;
         PWSTR  objectIDArray[NUM_OBJECTS_TO_REQUEST] = {nullptr};
         hr = enumObjectIDs->Next(NUM_OBJECTS_TO_REQUEST,    // Number of objects to request on each NEXT call
@@ -234,9 +191,12 @@ void RecursiveEnumerate(_In_ PCWSTR objectID, _In_ IPortableDeviceContent* conte
         if (SUCCEEDED(hr)) {
             // Traverse the results of the Next() operation and recursively enumerate
             // Remember to free all returned object identifiers using CoTaskMemFree()
+            
             for (DWORD index = 0; (index < numFetched) && (objectIDArray[index] != nullptr); index++) {
-                RecursiveEnumerate(objectIDArray[index], content);
-
+                RecursiveEnumerate(objectIDArray[index], content, deviceObjectIds);
+                char tempId[8];
+                wcstombs(tempId, objectIDArray[index], 8);
+                deviceObjectIds->push_back(tempId);
                 // Free allocated PWSTRs after the recursive enumeration call has completed.
                 CoTaskMemFree(objectIDArray[index]);
                 objectIDArray[index] = nullptr;
@@ -247,7 +207,7 @@ void RecursiveEnumerate(_In_ PCWSTR objectID, _In_ IPortableDeviceContent* conte
 
 // Enumerate all content on the device starting with the
 // "DEVICE" object
-void EnumerateAllContent(_In_ IPortableDevice* device) {
+void GetAllContent(_In_ IPortableDevice* device, std::vector<std::string>* deviceObjectIds) {
     HRESULT                         hr = S_OK;
     CComPtr<IPortableDeviceContent>  content;
 
@@ -261,14 +221,14 @@ void EnumerateAllContent(_In_ IPortableDevice* device) {
     // Enumerate content starting from the "DEVICE" object.
     if (SUCCEEDED(hr)) {
         wprintf(L"\n");
-        RecursiveEnumerate(WPD_DEVICE_OBJECT_ID, content.Detach());
+        RecursiveEnumerate(WPD_DEVICE_OBJECT_ID, content.Detach(), deviceObjectIds);
     }
 }
 
 // Reads and displays the device friendly name for the specified PnPDeviceID string
-void DisplayFriendlyName(IPortableDeviceManager *pPortableDeviceManager, PCWSTR pPnPDeviceID) {
+std::string GetDeviceName(IPortableDeviceManager *pPortableDeviceManager, PCWSTR pPnPDeviceID) {
     DWORD   cchFriendlyName = 0;
-    PWSTR   pszFriendlyName = nullptr;
+    wchar_t*   pszFriendlyName = nullptr;
 
     // First, pass nullptr as the PWSTR return string parameter to get the total number
     // of characters to allocate for the string value.
@@ -283,7 +243,9 @@ void DisplayFriendlyName(IPortableDeviceManager *pPortableDeviceManager, PCWSTR 
         if (pszFriendlyName != nullptr) {
             hr = pPortableDeviceManager->GetDeviceFriendlyName(pPnPDeviceID, pszFriendlyName, &cchFriendlyName);
             if (SUCCEEDED(hr)) {
-                printf("Friendly Name: %ws\n", pszFriendlyName);
+                char outName[256];
+                wcstombs(outName, pszFriendlyName, 256);
+                return outName;
             } else {
                 printf("! Failed to get device friendly name, hr = 0x%lx\n",hr);
             }
@@ -301,46 +263,11 @@ void DisplayFriendlyName(IPortableDeviceManager *pPortableDeviceManager, PCWSTR 
     }
 }
 
-// Reads and displays the device manufacturer for the specified PnPDeviceID string
-void DisplayManufacturer(IPortableDeviceManager* pPortableDeviceManager, PCWSTR pPnPDeviceID) {
-    DWORD   cchManufacturer = 0;
-    PWSTR   pszManufacturer = nullptr;
-
-    // First, pass nullptr as the PWSTR return string parameter to get the total number
-    // of characters to allocate for the string value.
-    HRESULT hr = pPortableDeviceManager->GetDeviceManufacturer(pPnPDeviceID, nullptr, &cchManufacturer);
-    if (FAILED(hr)) {
-        printf("! Failed to get number of characters for device manufacturer, hr = 0x%lx\n",hr);
-    }
-
-    // Second allocate the number of characters needed and retrieve the string value.
-    if ((hr == S_OK) && (cchManufacturer > 0)) {
-        pszManufacturer = new (std::nothrow) WCHAR[cchManufacturer];
-        if (pszManufacturer != nullptr) {
-            hr = pPortableDeviceManager->GetDeviceManufacturer(pPnPDeviceID, pszManufacturer, &cchManufacturer);
-            if (SUCCEEDED(hr)) {
-                printf("Manufacturer:  %ws\n", pszManufacturer);
-            } else {
-                printf("! Failed to get device manufacturer, hr = 0x%lx\n",hr);
-            }
-
-            // Delete the allocated manufacturer string
-            delete [] pszManufacturer;
-            pszManufacturer = nullptr;
-        } else {
-            printf("! Failed to allocate memory for the device manufacturer string\n");
-        }
-    }
-
-    if (SUCCEEDED(hr) && (cchManufacturer == 0)) {
-        printf("The device did not provide a manufacturer.\n");
-    }
-}
-
 // Enumerates all Windows Portable Devices, displays the friendly name,
 // manufacturer, and description of each device.  This function also
 // returns the total number of devices found.
-DWORD EnumerateAllDevices() {
+std::vector<WPDevice> GetAllDevices() {
+    std::vector<WPDevice>           devices;
     DWORD                           cPnPDeviceIDs = 0;
     PWSTR*                          pPnpDeviceIDs = nullptr;
     CComPtr<IPortableDeviceManager> pPortableDeviceManager;
@@ -367,7 +294,6 @@ DWORD EnumerateAllDevices() {
     // Report the number of devices found.  NOTE: we will report 0, if an error
     // occured.
 
-    printf("\n%lu Windows Portable Device(s) found on the system\n\n", cPnPDeviceIDs);
     // Second, allocate an array to hold the PnPDeviceID strings returned from
     // the IPortableDeviceManager::GetDevices method
     if (SUCCEEDED(hr) && (cPnPDeviceIDs > 0)) {
@@ -380,11 +306,13 @@ DWORD EnumerateAllDevices() {
                 // For each device found, display the devices friendly name,
                 // manufacturer, and description strings.
                 for (dwIndex = 0; dwIndex < cPnPDeviceIDs; dwIndex++) {
-                    printf("[%lu] ", dwIndex);
-                    DisplayFriendlyName(pPortableDeviceManager, pPnpDeviceIDs[dwIndex]);
-                    printf("    ");
-                    DisplayManufacturer(pPortableDeviceManager, pPnpDeviceIDs[dwIndex]);
-                    printf("    ");
+                    devices.push_back(
+                        WPDevice{
+                            "WPD",
+                            GetDeviceName(pPortableDeviceManager, pPnpDeviceIDs[dwIndex]), 
+                            pPnpDeviceIDs[dwIndex]
+                        }
+                    );
                 }
             } else {
                 printf("! Failed to get the device list from the system, hr = 0x%lx\n",hr);
@@ -405,7 +333,7 @@ DWORD EnumerateAllDevices() {
             printf("! Failed to allocate memory for PWSTR array\n");
         }
     }
-    return cPnPDeviceIDs;
+    return devices;
 }
 
 // Reads a string property from the IPortableDeviceProperties
